@@ -23,6 +23,8 @@ int handle_get_request(int client_socket, char *path) {
 	char *resource = match_path(path);
 
 	printf("%s\n", resource);
+	printf("I'm a happy tea pot");
+	printf("Come on now");
 	//open a file to serve
 	FILE *html_data;
 	html_data = fopen(resource, "r");
@@ -59,10 +61,24 @@ int handle_get_request(int client_socket, char *path) {
 }
 
 int handle_post_request(int client_socket, char *path, char *buffer) {
+	
+	char http_header[2048];
 	// segfault on empty file name, kick the request out
 	if (!strcmp(path, "/")) {
 		perror("URL request path cannot be empty");
-		//TODO: send error to client
+		sprintf(http_header,
+				"HTTP/1.1 400 BAD REQUEST\r\n"
+				"Connection: close\r\n"
+				"Content-Length: 27\r\n"
+				"Content-Type: application/json\r\n\r\n"
+				"{\"status\": \"bad request\"}\r\n");
+		long header_length = strlen(http_header); // always 122
+		int bytes_sent = send(client_socket, http_header, header_length, 0);
+
+		if (bytes_sent < 0) {
+			perror("No bytes were sent to the client\n");
+			return 2;
+		}
 		return 1;
 	}
 
@@ -76,28 +92,27 @@ int handle_post_request(int client_socket, char *path, char *buffer) {
 	//Using strlen is probably cleaner than strcmp
 	//Using strtok once more instead of precariously moving the pointer is probably cleaner
 	
-	char file_name[128] = "posts";
+	char file_name[128] = "serverfiles/posts";
 	strcat(file_name, path);
 			
 	FILE *new_file = fopen(file_name, "w");
 	fwrite(buffer_pointer, sizeof(char), 1024, new_file);
 	fclose(new_file);
 
-	char http_header[2048];
 	sprintf(http_header, 
 		"HTTP/1.1 201 CREATED\r\n"
 		"Connection: close\r\n"
-		"Content-Length: 16\r\n"
+		"Content-Length: 18\r\n"
 		"Content-Type: application/json\r\n\r\n"
-		"{\"status\": \"ok\"}");
+		"{\"status\": \"ok\"}\r\n");
 
-	long header_length = strlen(http_header); // always 111
+	long header_length = strlen(http_header); // always 113
 	
 	int bytes_sent = send(client_socket, http_header, header_length, 0);
 
 	if (bytes_sent < 0) {
 		perror("No bytes were sent to the client\n");
-		return 1;
+		return 2;
 	}
 
 	return 0;
