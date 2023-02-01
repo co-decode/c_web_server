@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 
@@ -7,6 +8,8 @@
 //#include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <pthread.h>
+
 #include "http.h"
 #include "hashtable.h"
 #include "routes.h"
@@ -14,7 +17,6 @@
 #define PORT 8001
 
 // TODO:
-// 	- Extract http_header composition to its own function
 // 	- Integrate multiple threads.
 
 int initialise_server_socket() {
@@ -37,7 +39,7 @@ int initialise_server_socket() {
 	
 	if (bindStatus) perror("Bind failed\n");
 
-	listen(server_socket, 5);
+	listen(server_socket, 50);
 
 	return server_socket;
 }
@@ -57,9 +59,13 @@ int main() {
 	while(1) {
 		client_socket = accept(server_socket, NULL, NULL);
 
-		parse_request(client_socket);
+		pthread_t thread;
+		int *p_client_socket = malloc(sizeof(int));
+		*p_client_socket = client_socket;
 
-		close(client_socket);
+		pthread_create(&thread, NULL, parse_request, p_client_socket);
+		// call detach so that pthread knows to free the thread's resources
+		pthread_detach(thread);
 	}
 
 	return 0;

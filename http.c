@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sys/socket.h>
 
@@ -9,7 +10,18 @@
 
 #define SERVERFILES "./serverfiles/"
 
-int parse_request(int client_socket) {
+#define STATUS_200 "200 OK"
+#define STATUS_201 "201 Created"
+#define STATUS_401 "401 Bad Request"
+#define STATUS_403 "403 Forbidden"
+#define STATUS_404 "404 Not Found"
+
+//	TODO: Move the sending of responses to a central function
+
+void *parse_request(void *p_client_socket) {
+	int client_socket = *((int *)p_client_socket);
+	free(p_client_socket);
+
 	int buffer_size = 65536;
 	char buffer[buffer_size];
 
@@ -18,14 +30,15 @@ int parse_request(int client_socket) {
 
 	if (bytes_received < 0) {
 		perror("No bytes were received\n");
-		return 1;
+		close(client_socket);
+		return NULL;
 	}
 	printf("%s\n", buffer);
 
 	char method[16];
 	char path[128];
 
-	sscanf(buffer, "%s %s", method, path);
+	sscanf(buffer, "%15s %127s", method, path);
 
 	printf("method: %s, path: %s\n", method, path);
 
@@ -40,50 +53,72 @@ int parse_request(int client_socket) {
 	}
 	else
 		perror("Unrecognised METHOD\n");
-	return 0;
+
+	close(client_socket);
+	return NULL;
 }
 
-int handle_get_request(int client_socket, char *path) {
-	char *resource = get_value_from_hashtable(path);
-	if (resource == NULL) resource = "404.html";
-
-	char filepath[4096];
-
-	snprintf(filepath,
-		sizeof(filepath),
-		"%s%s",
-		SERVERFILES,
-		resource);
-
-	printf("%s\n", filepath);
-	//open a file to serve
-	FILE *html_data;
-	html_data = fopen(filepath, "r");
-
-	char response_data[1024];
-	char *rd_pointer = response_data;
-	long content_length = 0; 
-	// read file into response_data string
-	while ((*(rd_pointer) = fgetc(html_data)) != EOF){
-		rd_pointer++;
-		content_length++;
-	}
-	*rd_pointer = '\0';
-
-	fclose(html_data);
-	printf("%d %ld\n", *(rd_pointer - 1), content_length);
-
-
-	char http_header[2048];
-	sprintf(http_header, "HTTP/1.1 200 OK\r\n"
+char *generate_response(char *status, char *mime_type, char* content, unsigned long content_length) {
+	char *header = calloc(2048, sizeof(char));
+	snprintf(header, 2048,
+		"HTTP/1.1 %s\r\n"
 		"Connection: close\r\n"
 		"Content-Length: %ld\r\n"
-		"Content-Type: text/html\r\n\r\n", content_length);
-	strcat(http_header, response_data);
+		"Content-Type: %s\r\n\r\n"
+		"%s\r\n",
+		status, content_length + 2, mime_type, content);
 
-	long header_length = strlen(http_header);
+	return header;
+}
 	
-	int bytes_sent = send(client_socket, http_header, header_length, 0);
+
+int handle_get_request(int client_socket, char *path) {
+	char *status = STATUS_200;
+	char *content_type = "text/html";
+
+	char *resource = get_value_from_hashtable(path);
+	if (resource == NULL) {
+		resource = "404.html";
+		status = STATUS_404;
+	}
+	else { // crude mime check, TODO: make mime check functions
+		char start[7];
+		sscanf(resource, "%6s", start);
+		start[6] = '\0';
+		if (!strcmp("posts/", start))
+			content_type = "text/plain";
+	}
+
+	char filepath[512];
+
+	snprintf(filepath,sizeof(filepath),"%s%s",SERVERFILES,resource);
+
+	//!printf("%s\n", filepath);
+	//open a file to serve
+	FILE *file_data;
+	file_data = fopen(filepath, "r");
+
+	char content[1024];
+	char *content_pointer = content;
+	unsigned long content_length = 0; 
+	
+	// read file into content string
+	while ((*(content_pointer) = fgetc(file_data)) != EOF){
+		content_pointer++;
+		content_length++;
+	}
+	*content_pointer = '\0';
+
+	fclose(file_data);
+
+	char *response = generate_response(status, content_type, content, content_length);
+
+
+	long response_length = strlen(response);
+	
+	int bytes_sent = send(client_socket, response, response_length, 0);
+
+	free(response);
 
 	if (bytes_sent < 0) {
 		perror("No bytes were sent to the client\n");
@@ -94,19 +129,16 @@ int handle_get_request(int client_socket, char *path) {
 }
 
 int handle_post_request(int client_socket, char *path, char *buffer) {
-	
-	char http_header[2048];
 	// segfault on empty file name, kick the request out
 	if (!strcmp(path, "/")) {
 		perror("URL request path cannot be empty");
-		sprintf(http_header,
-				"HTTP/1.1 400 BAD REQUEST\r\n"
-				"Connection: close\r\n"
-				"Content-Length: 27\r\n"
-				"Content-Type: application/json\r\n\r\n"
-				"{\"status\": \"bad request\"}\r\n");
-		long header_length = strlen(http_header); // always 122
-		int bytes_sent = send(client_socket, http_header, header_length, 0);
+		char content[128] = "{\"status\": \"bad request\"}";
+		unsigned long content_length = strlen(content);
+		char *response = generate_response(STATUS_401, "application/json", content, content_length);
+		long response_length = strlen(response);
+		int bytes_sent = send(client_socket, response, response_length, 0);
+
+		free(response);
 
 		if (bytes_sent < 0) {
 			perror("No bytes were sent to the client\n");
@@ -115,33 +147,30 @@ int handle_post_request(int client_socket, char *path, char *buffer) {
 		return 1;
 	}
 
-	// advance buffer pointer to the start of the body
+	// advance buffer pointer to the start of the request body
 	char *buffer_pointer;
 	buffer_pointer = strtok(buffer, "\n");
-	while (strcmp(buffer_pointer = (strtok(NULL, "\n")), "\r"));
-	buffer_pointer += 2;
+	//	strlen is more robust than strcmp here
+	//	\r\n and \n are captured because one will leave strlen = 1 and the other strlen = 0
+	while (strlen(buffer_pointer = strtok(NULL, "\n")) > 1);
+	buffer_pointer = strtok(NULL, "\n");
 
-	//It doesn't seem like a line feed can appear in the body,
-	//Using strlen is probably cleaner than strcmp
-	//Using strtok once more instead of precariously moving the pointer is probably cleaner
-	
 	char file_name[128] = "serverfiles/posts";
 	strcat(file_name, path);
+	strcat(file_name, ".txt");
 			
 	FILE *new_file = fopen(file_name, "w");
 	fwrite(buffer_pointer, sizeof(char), 1024, new_file);
 	fclose(new_file);
 
-	sprintf(http_header, 
-		"HTTP/1.1 201 CREATED\r\n"
-		"Connection: close\r\n"
-		"Content-Length: 23\r\n"
-		"Content-Type: application/json\r\n\r\n"
-		"{\"status\": \"created\"}\r\n");
+	char content[128] = "{\"status\": \"created\"}";
+	unsigned long content_length = strlen(content); // Is there a better way to do this?
+	char *response = generate_response(STATUS_201, "application/json", content, content_length);
 
-	long header_length = strlen(http_header); // always 118
+	long response_length = strlen(response);
 	
-	int bytes_sent = send(client_socket, http_header, header_length, 0);
+	int bytes_sent = send(client_socket, response, response_length, 0);
+	free(response);
 
 	if (bytes_sent < 0) {
 		perror("No bytes were sent to the client\n");
@@ -152,20 +181,19 @@ int handle_post_request(int client_socket, char *path, char *buffer) {
 }
 
 int handle_delete_request(int client_socket, char *path) {
-	char response[1024];
 
 	char *value = get_value_from_hashtable(path);
+
 	if (value == NULL) {
-		sprintf(response, 
-			"HTTP/1.1 401 Bad request\r\n"
-			"Connection: close\r\n"
-			"Content-Length: 27\r\n"
-			"Content-Type: application/json\r\n\r\n"
-			"{\"status\": \"bad request\"}\r\n");
+		char content[128] = "{\"status\": \"bad request\"}";
+		unsigned long content_length = strlen(content);
 
-		long header_length = strlen(response); 		
+		char *response = generate_response(STATUS_401, "application/json", content, content_length);
+		long response_length = strlen(response);
 
-		int bytes_sent = send(client_socket, response, header_length, 0);
+		int bytes_sent = send(client_socket, response, response_length, 0);
+
+		free(response);
 
 		if (bytes_sent < 0) {
 			perror("No bytes were sent to the client\n");
@@ -180,16 +208,14 @@ int handle_delete_request(int client_socket, char *path) {
 
 	if (strcmp(start, "posts/")) {
 		printf("Request rejected - may not delete non-post files\n");
-		sprintf(response, 
-			"HTTP/1.1 403 Forbidden\r\n"
-			"Connection: close\r\n"
-			"Content-Length: 25\r\n"
-			"Content-Type: application/json\r\n\r\n"
-			"{\"status\": \"forbidden\"}\r\n");
+		char content[128] = "{\"status\": \"forbidden\"}";
+		unsigned int content_length = strlen(content);
 
-		long header_length = strlen(response); 		
+		char *response = generate_response(STATUS_403, "application/json", content, content_length);
 
-		int bytes_sent = send(client_socket, response, header_length, 0);
+		long response_length = strlen(response); 		
+
+		int bytes_sent = send(client_socket, response, response_length, 0);
 
 		if (bytes_sent < 0) {
 			perror("No bytes were sent to the client\n");
@@ -198,7 +224,7 @@ int handle_delete_request(int client_socket, char *path) {
 		return 1;
 	}
 
-	char filepath[4096];
+	char filepath[512];
 	snprintf(filepath, sizeof(filepath), "%s%s", SERVERFILES, value);
 
 	int successful_removal = remove(filepath);
@@ -211,17 +237,13 @@ int handle_delete_request(int client_socket, char *path) {
 	remove_from_hashtable(path);
 
 	// Send successful delete response
-	
-	sprintf(response, 
-		"HTTP/1.1 200 OK\r\n"
-		"Connection: close\r\n"
-		"Content-Length: 18\r\n"
-		"Content-Type: application/json\r\n\r\n"
-		"{\"status\": \"ok\"}\r\n");
+	char *content = "{\"status\": \"ok\"}";
+	unsigned long content_length = strlen(content);
+	char *response = generate_response(STATUS_200, "application/json", content, content_length);
 
-	long header_length = strlen(response); // always 108
+	long response_length = strlen(response);
 	
-	int bytes_sent = send(client_socket, response, header_length, 0);
+	int bytes_sent = send(client_socket, response, response_length, 0);
 
 	if (bytes_sent < 0) {
 		perror("No bytes were sent to the client\n");
@@ -230,6 +252,3 @@ int handle_delete_request(int client_socket, char *path) {
 
 	return 0;
 }
-
-
-
